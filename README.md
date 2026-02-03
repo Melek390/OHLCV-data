@@ -38,8 +38,8 @@ A professional Python-based data pipeline for fetching, processing, and storing 
 ### Clone Repository
 
 ```bash
-git clone https://github.com/yourusername/ohlcv-ingestion-system.git
-cd ohlcv-ingestion-system
+git clone https://github.com/Melek390/OHLCV-data
+cd OHLCV-data
 ```
 
 ### Install Dependencies
@@ -139,37 +139,30 @@ USE_OAUTH = True
 
 ## 🔐 Authentication Setup
 
-### Option 1: OAuth2 (Recommended for Personal Use)
+### OAuth (Recommended for Personal Use)
 
 1. **Go to Google Cloud Console**: https://console.cloud.google.com/
 2. **Create a new project** or select existing one
-3. **Enable APIs**:
-   - Google Sheets API
-   - Google Drive API
-4. **Create OAuth2 credentials**:
-   - Go to "Credentials" → "Create Credentials" → "OAuth client ID"
+3. **Create OAuth2 credentials**:
+   - Go to "API&Services" →"Credentials" → "Create Credentials" → "OAuth client ID"
    - Application type: "Desktop app"
    - Download the JSON file
+4. **Enable APIs**:
+   - Google Sheets API
+   - Google Drive API
+
 5. **Save credentials**:
    - Rename to `oauth_credentials.json`
    - Place in `credentials/` directory
+6. **Add user email**:
+   - Go to `Audience`
+   - Click `Add users`
+   - Add your email 
 6. **First run**: Browser will open for authorization
    - Sign in to your Google account
    - Grant permissions
    - Token will be saved for future use
 
-### Option 2: Service Account (For Automation)
-
-1. **Create Service Account**:
-   - Google Cloud Console → "IAM & Admin" → "Service Accounts"
-   - Create new service account
-   - Download JSON key file
-2. **Save credentials**:
-   - Rename to match `SERVICE_ACCOUNT_PATH` in config
-   - Place in `credentials/` directory
-3. **Share Drive folder**:
-   - Share your Google Drive folder with the service account email
-   - Grant "Editor" permissions
 
 ## 🎯 Usage
 
@@ -417,23 +410,6 @@ The system validates data at multiple stages:
 5. **Timestamp Validation**: Converts to UTC datetime
 6. **Deduplication**: Removes duplicate timestamps
 
-## 🔒 Security Best Practices
-
-1. **Never commit credentials**: Add to `.gitignore`:
-   ```
-   credentials/*.json
-   credentials/*.pickle
-   ```
-
-2. **Use environment variables** for sensitive config:
-   ```python
-   import os
-   DRIVE_FOLDER_ID = os.getenv('DRIVE_FOLDER_ID')
-   ```
-
-3. **Restrict API permissions**: Grant minimum required scopes
-
-4. **Rotate credentials**: Regularly update service account keys
 
 ## 🚀 Advanced Usage
 
@@ -451,14 +427,6 @@ for pair in pairs:
         pass
 ```
 
-### Automated Scheduling
-
-Use cron or Task Scheduler:
-
-```bash
-# Fetch data every hour
-0 * * * * cd /path/to/project && python main.py --auto --pair BTC-USD --tf 1h
-```
 
 ### Custom Timeframes
 
@@ -490,21 +458,11 @@ freq_map = {
 4. **Parallel processing**: Use multiprocessing for multiple pairs
 5. **Incremental updates**: Only fetch new data, existing data is deduplicated
 
-## 🤝 Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add amazing feature'`
-4. Push to branch: `git push origin feature/amazing-feature`
-5. Open a Pull Request
-
 ### Development Setup
 
 ```bash
 # Clone your fork
-git clone https://github.com/yourusername/ohlcv-ingestion-system.git
+git clone https://github.com/Melek390/OHLCV-data
 
 # Create virtual environment
 python -m venv venv
@@ -517,9 +475,6 @@ pip install -r requirements-dev.txt
 pytest tests/
 ```
 
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
@@ -528,31 +483,15 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - pandas for powerful data manipulation
 - The Python community for excellent libraries
 
-## 📧 Contact
 
-For questions or support:
-- Open an issue on GitHub
-- Email: your.email@example.com
-- Twitter: @yourhandle
-
-## 🔄 Changelog
-
-### Version 3.0 (Current)
+### Version 1.0 (Current)
 - ✨ Added support for unsupported timeframes (4h, 1w)
 - 🔧 Smart timeframe generation from source data
 - 📦 Improved data caching mechanism
 - 🎨 Enhanced user interface with progress indicators
 - 🐛 Fixed pandas resampling frequency issues
 
-### Version 2.0
-- ☁️ Added Google Drive backup functionality
-- 🔐 OAuth2 authentication support
-- 💾 Local CSV storage with deduplication
 
-### Version 1.0
-- 🎉 Initial release
-- 📥 Coinbase API integration
-- 📊 Basic OHLCV data fetching
 
 ## 📚 Additional Resources
 
@@ -563,4 +502,3 @@ For questions or support:
 
 ---
 
-**Made with ❤️ for the crypto trading community**

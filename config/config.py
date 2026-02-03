@@ -16,7 +16,7 @@ LOCAL_DATA_DIR = BASE_DIR / "data"
 # =========================
 # GOOGLE DRIVE CONFIG
 # =========================
-DRIVE_FOLDER_ID = "1j7bx72geBnucQ6km_hfcd_Nl_9d5ofHq"
+DRIVE_FOLDER_ID = "YOUR DRIVER FOLDER ID (find it in the link of the drive folder eg: https://drive.google.com/drive/folders/XXXXXXXXXXXXXXXXXXXXX)"
 DRIVE_FOLDER_NAME = "OHLCV_DATA"
 
 # Google API Scopes
