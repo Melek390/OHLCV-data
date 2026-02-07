@@ -4,14 +4,19 @@ A professional Python-based data pipeline for fetching, processing, and storing 
 
 ## ✨ Features
 
-- 🔄 **Multi-Timeframe Support**: 1h, 4h, 6h, 1d, 1w
-- 📥 **Direct API Integration**: Fetches data from Coinbase Exchange API
-- 🔧 **Smart Timeframe Generation**: Automatically generates unsupported timeframes (4h, 1w) from supported ones
+- 🔄 **Multi-Timeframe Support**: 5m, 30m, 1h, 6h, 1d, 1w
+- 📥 **Dual API Integration**: 
+  - Coinbase Exchange API (5m, 1h, 6h, 1d)
+  - Coinbase Advanced Trade API (30m) with CDP authentication
+- 🔧 **Smart Weekly Aggregation**: Generates 1w timeframe from 1d data (Sunday-Sunday)
 - 💾 **Local CSV Storage**: Stores data locally with automatic deduplication
 - ☁️ **Google Drive Backup**: Optional upload to Google Sheets for cloud storage
-- 🔐 **Dual Authentication**: Support for both OAuth2 and Service Account authentication
+- 🔐 **Dual Authentication**: 
+  - OAuth2 for Google Drive/Sheets
+  - CDP API key for Advanced Trade API (30m data)
 - ✅ **Data Validation**: Comprehensive validation and error handling
 - 📊 **Progress Tracking**: Real-time progress indicators and detailed logging
+- 🔄 **Automatic Pagination**: Fetches historical data across multiple years
 
 ## 📋 Table of Contents
 
@@ -57,6 +62,9 @@ gspread>=5.0.0
 google-auth>=2.0.0
 google-auth-oauthlib>=0.5.0
 google-auth-httplib2>=0.1.0
+google-api-python-client>=2.0.0
+PyJWT>=2.8.0
+cryptography>=41.0.0
 ```
 
 ## 📁 Project Structure
@@ -68,14 +76,18 @@ ohlcv-ingestion-system/
 │   └── config.py                 # Configuration settings
 │
 ├── credentials/
-│   ├── oauth_credentials.json    # OAuth2 credentials (if using OAuth)
-│   ├── service_account.json      # Service account key (if using SA)
+│   ├── cdp_api_key.json         # Coinbase CDP API credentials (for 30m data)
+│   ├── oauth_credentials.json    # OAuth2 credentials (for Google Drive)
 │   └── token.pickle              # Cached OAuth tokens
 │
 ├── data/                         # Local CSV storage
 │   └── coinbase/
+│       ├── BTC-USD_5m.csv
+│       ├── BTC-USD_30m.csv
 │       ├── BTC-USD_1h.csv
-│       ├── BTC-USD_4h.csv
+│       ├── BTC-USD_6h.csv
+│       ├── BTC-USD_1d.csv
+│       ├── BTC-USD_1w.csv
 │       └── ...
 │
 ├── drive/
@@ -84,9 +96,11 @@ ohlcv-ingestion-system/
 │   └── sheets.py                 # Google Sheets operations
 │
 ├── exchanges/
-│   ├── __init__.py
-│   ├── coinbase.py               # Coinbase API client
-│   └── unsupported_tfs.py        # Unsupported timeframe generator
+│   └── coinbase/
+│       ├── __init__.py
+│       ├── coinbase.py           # Coinbase Exchange API (5m, 1h, 6h, 1d)
+│       ├── advanced_trade.py     # Coinbase Advanced Trade API (30m)
+│       └── weekly_aggregator.py  # Weekly aggregation (1d → 1w)
 │
 ├── storage/
 │   ├── __init__.py
@@ -117,52 +131,79 @@ LOCAL_DATA_DIR = BASE_DIR / "data"
 DRIVE_FOLDER_ID = "your-folder-id-here"
 
 # Timeframes configuration
-SUPPORTED_TIMEFRAMES = ["1h", "6h", "1d"]      # Natively supported by Coinbase
-UNSUPPORTED_TIMEFRAMES = ["4h", "1w"]          # Generated from supported ones
-
-# Timeframe generation mapping
-UNSUPPORTED_SOURCE_MAP = {
-    "4h": "1h",  # Generate 4h from 1h data
-    "1w": "1d",  # Generate 1w from 1d data
-}
+EXCHANGE_API_TIMEFRAMES = ["5m", "1h", "6h", "1d"]      # Coinbase Exchange API
+ADVANCED_TRADE_TIMEFRAMES = ["30m"]                      # Coinbase Advanced Trade API
+AGGREGATED_TIMEFRAMES = ["1w"]                           # Generated from daily data
+ALL_TIMEFRAMES = ["5m", "30m", "1h", "6h", "1d", "1w"]  # All available
 ```
+
+### API Configuration
+
+The system uses two different Coinbase APIs:
+
+1. **Coinbase Exchange API** (Public, no auth needed)
+   - Timeframes: 5m, 1h, 6h, 1d
+   - Endpoint: `https://api.exchange.coinbase.com`
+
+2. **Coinbase Advanced Trade API** (Requires CDP API key)
+   - Timeframe: 30m only
+   - Authentication: JWT with EC private key
+   - Credentials: `credentials/cdp_api_key.json`
 
 ### Authentication Mode
 
-In `main.py`, choose your authentication method:
+In `main.py`, choose your Google authentication method:
 
-```python
-# Set to True for OAuth2 (your personal Google account)
-# Set to False for Service Account
+```
 USE_OAUTH = True
 ```
 
 ## 🔐 Authentication Setup
 
-### OAuth (Recommended for Personal Use)
+### OAuth2 for Google Drive/Sheets (Recommended)
 
 1. **Go to Google Cloud Console**: https://console.cloud.google.com/
 2. **Create a new project** or select existing one
 3. **Create OAuth2 credentials**:
-   - Go to "API&Services" →"Credentials" → "Create Credentials" → "OAuth client ID"
+   - Go to "APIs & Services" → "Credentials" → "Create Credentials" → "OAuth client ID"
    - Application type: "Desktop app"
    - Download the JSON file
 4. **Enable APIs**:
    - Google Sheets API
    - Google Drive API
-
 5. **Save credentials**:
    - Rename to `oauth_credentials.json`
    - Place in `credentials/` directory
-6. **Add user email**:
-   - Go to `Audience`
-   - Click `Add users`
-   - Add your email 
-6. **First run**: Browser will open for authorization
+6. **Add user email** (if using test mode):
+   - Go to "OAuth consent screen" → "Test users"
+   - Add your email
+7. **First run**: Browser will open for authorization
    - Sign in to your Google account
    - Grant permissions
    - Token will be saved for future use
 
+### Coinbase CDP API for 30m Data
+
+1. **Go to Coinbase Developer Portal**: https://portal.cdp.coinbase.com/
+2. **Create API Key**:
+   - Navigate to "API Keys" section
+   - Click "Create API Key" (for algorithm: choose ECDSA)
+   - Select required permissions (read access for market data)
+3. **Download credentials**:
+   - Save the JSON file containing `name` and `privateKey`
+4. **Save to project**:
+   - Rename to `cdp_api_key.json`
+   - Place in `credentials/` directory
+
+**Example `cdp_api_key.json` format:**
+```json
+{
+  "name": "organizations/YOUR_ORG_ID/apiKeys/YOUR_KEY_ID",
+  "privateKey": "-----BEGIN EC PRIVATE KEY-----\nYOUR_PRIVATE_KEY_HERE\n-----END EC PRIVATE KEY-----"
+}
+```
+
+> **Note**: The 30m timeframe REQUIRES CDP API credentials. All other timeframes use the public Exchange API.
 
 ## 🎯 Usage
 
@@ -184,7 +225,14 @@ python main.py
 ### Example Session
 
 ```
-📊 OHLCV Data Ingestion System v3.0
+📊 OHLCV Data Ingestion System v4.2
+======================================================================
+   Professional REST → Local CSV → Google Sheets Pipeline
+   📁 Local storage with deduplication
+   ☁️  Optional Drive backup
+   📈 Supports: 5m, 30m, 1h, 6h, 1d, 1w
+   🔄 Automatic pagination for historical data
+   🔑 30m data via CDP API (cdp_api_key.json)
 ======================================================================
 
 🏢 Available Exchanges:
@@ -195,72 +243,87 @@ Select exchange (default: coinbase):
 📈 Enter trading pair (default: BTC-USD): ETH-USD
 
 ⏱️  Available Timeframes:
-  1h, 4h, 6h, 1d, 1w
+  5m, 30m, 1h, 6h, 1d, 1w
 
-Enter timeframes (comma-separated, e.g., 1h,4h,1d): 1h,4h,1d
+  📌 Notes:
+    • 5m, 1h, 6h, 1d: Exchange API (REST)
+    • 30m: Advanced Trade API (requires CDP credentials)
+    • 1w: Aggregated from daily data (Sunday-Sunday)
 
-✅ Configuration:
-  Exchange:   Coinbase
-  Pair:       ETH-USD
-  Timeframes: 1h, 4h, 1d
+Enter timeframes (comma-separated, e.g., 5m,1h,1d): 1h,30m,1w
+
+📅 Historical Data Range (Optional)
+Start year (e.g., 2022) [Press Enter to skip]: 2024
+End year (e.g., 2024) [Press Enter to skip]: 2024
+
+✅ Will fetch data from Jan 1, 2024 to Dec 31, 2024
 
 📥 FETCHING & STORING DATA LOCALLY
 ======================================================================
 
-🔹 Processing SUPPORTED timeframes (direct API fetch)...
+📊 Processing Exchange API timeframes...
 
 ⏳ Processing 1H timeframe...
-  📥 Fetched 300 candles from API
-  ✅ Processed 300 valid candles
-  ✅ Saved 300 new rows to: ETH-USD_1h.csv
+  🌐 Fetching 8784 candles from API
+  ✅ Saved 8760 new rows to: ETH-USD_1h.csv
 
-⏳ Processing 1D timeframe...
-  📥 Fetched 365 candles from API
-  ✅ Processed 365 valid candles
-  ✅ Saved 365 new rows to: ETH-USD_1d.csv
+📊 Processing Advanced Trade API timeframes...
 
-🔸 Processing UNSUPPORTED timeframes (generating from source data)...
+⏳ Processing 30M timeframe...
+  🔑 Using CDP API authentication
+  🌐 Fetching historical 30m data
+  ✅ Saved 17520 new rows to: ETH-USD_30m.csv
 
-⏳ Processing 4H timeframe...
-  ℹ️  Unsupported by API - will generate from 1H data
-  📦 Using cached 1H data (300 rows)
-  ✅ Generated 75 4H candles
-  ✅ Saved 75 new rows to: ETH-USD_4h.csv
+📊 Processing Weekly aggregated timeframes...
 
+⏳ Processing 1W timeframe...
+  🔄 Aggregated 365 daily → 52 weekly candles (Sunday-Sunday)
+  ✅ Saved 52 new rows to: ETH-USD_1w.csv
+
+☁️  GOOGLE DRIVE BACKUP
 Upload to Drive? (y/n): y
+✅ All data uploaded successfully!
 ```
 
 ## ⏱️ Timeframe Support
 
-### Supported Timeframes (Direct API Fetch)
+### Exchange API Timeframes (Direct Fetch - No Auth Required)
 
-| Timeframe | Description | API Support | Storage |
-|-----------|-------------|-------------|---------|
-| **1h** | 1 Hour | ✅ Native | CSV |
-| **6h** | 6 Hours | ✅ Native | CSV |
-| **1d** | 1 Day | ✅ Native | CSV |
+| Timeframe | Description | Granularity | API Endpoint |
+|-----------|-------------|-------------|--------------|
+| **5m** | 5 Minutes | 300s | Coinbase Exchange API |
+| **1h** | 1 Hour | 3600s | Coinbase Exchange API |
+| **6h** | 6 Hours | 21600s | Coinbase Exchange API |
+| **1d** | 1 Day | 86400s | Coinbase Exchange API |
 
-### Unsupported Timeframes (Generated)
+### Advanced Trade API Timeframes (CDP Auth Required)
 
-| Timeframe | Description | Generated From | Method |
-|-----------|-------------|----------------|--------|
-| **4h** | 4 Hours | 1h data | Pandas resample |
-| **1w** | 1 Week | 1d data | Pandas resample |
+| Timeframe | Description | Granularity | Authentication |
+|-----------|-------------|-------------|----------------|
+| **30m** | 30 Minutes | "THIRTY_MINUTE" | CDP API Key (JWT) |
 
-### How Timeframe Generation Works
+### Aggregated Timeframes (Generated from Daily Data)
 
-The system uses pandas resampling to aggregate data:
+| Timeframe | Description | Source | Aggregation Method |
+|-----------|-------------|--------|-------------------|
+| **1w** | 1 Week | 1d data | Sunday-Sunday grouping |
 
-- **4h from 1h**: Combines four 1-hour candles into one 4-hour candle
-  - Open: First 1h open
-  - High: Maximum 1h high
-  - Low: Minimum 1h low
-  - Close: Last 1h close
-  - Volume: Sum of 1h volumes
+### Weekly Aggregation Details
 
-- **1w from 1d**: Combines daily candles into weekly candles
-  - Week starts on Monday
-  - Same aggregation logic as 4h
+The system aggregates daily candles into weekly candles with the following logic:
+
+- **Week Boundaries**: Sunday 00:00 to next Sunday 00:00
+- **Timestamp Label**: Start of week (Sunday midnight)
+- **Open**: First daily open of the week (Sunday)
+- **High**: Maximum daily high of the week
+- **Low**: Minimum daily low of the week
+- **Close**: Last daily close of the week (Saturday)
+- **Volume**: Sum of daily volumes
+
+**Important**: 
+- Weekly timestamp represents the START of the week, not the end
+- Aligns with TradingView's weekly chart timestamps
+- First hourly candle of the week ends at Monday 1 AM
 
 ## 📂 File Structure
 
@@ -279,32 +342,66 @@ timestamp,open,high,low,close,volume,symbol
 ```
 data/
 └── coinbase/
+    ├── BTC-USD_5m.csv    # 5-minute Bitcoin data
+    ├── BTC-USD_30m.csv   # 30-minute Bitcoin data (Advanced Trade API)
     ├── BTC-USD_1h.csv    # 1-hour Bitcoin data
-    ├── BTC-USD_4h.csv    # 4-hour Bitcoin data (generated)
     ├── BTC-USD_6h.csv    # 6-hour Bitcoin data
     ├── BTC-USD_1d.csv    # Daily Bitcoin data
-    ├── BTC-USD_1w.csv    # Weekly Bitcoin data (generated)
-    ├── ETH-USD_1h.csv    # 1-hour Ethereum data
+    ├── BTC-USD_1w.csv    # Weekly Bitcoin data (aggregated, Sunday-Sunday)
+    ├── ETH-USD_5m.csv    # 5-minute Ethereum data
     └── ...
 ```
 
 ## 🔧 API Reference
 
-### Coinbase API Client
+### Coinbase Exchange API Client
 
 ```python
 from exchanges.coinbase import fetch_ohlcv, validate_symbol
 
-# Fetch OHLCV data
+# Fetch OHLCV data (5m, 1h, 6h, 1d)
 data = fetch_ohlcv(
     symbol="BTC-USD",
     timeframe="1h",
-    start="2024-01-01T00:00:00Z",  # Optional
-    end="2024-01-31T23:59:59Z"      # Optional
+    num_candles=300,           # Number of candles to fetch
+    start_year=2024,            # Optional: start year
+    end_year=2024               # Optional: end year
 )
 
 # Validate trading pair
 is_valid = validate_symbol("BTC-USD")
+```
+
+### Coinbase Advanced Trade API Client
+
+```python
+from exchanges.coinbase.advanced_trade import fetch_ohlcv_advanced
+
+# Fetch 30m OHLCV data (requires CDP API credentials)
+data = fetch_ohlcv_advanced(
+    symbol="BTC-USD",
+    timeframe="30m",
+    start_year=2024,            # Optional: start year
+    end_year=2024               # Optional: end year
+)
+```
+
+### Weekly Aggregator
+
+```python
+from exchanges.coinbase.weekly_aggregator import (
+    aggregate_to_weekly, 
+    calculate_required_daily_candles
+)
+
+# Aggregate daily data to weekly
+weekly_data = aggregate_to_weekly(daily_data_list)
+
+# Calculate how many daily candles needed
+num_daily = calculate_required_daily_candles(
+    start_year=2024,
+    end_year=2024
+)
 ```
 
 ### Local Storage Manager
@@ -335,49 +432,45 @@ df = storage.load_csv(
 stats = storage.get_storage_stats()
 ```
 
-### Unsupported Timeframe Generator
-
-```python
-from exchanges.unsupported_tfs import generate_4h_from_1h, generate_1w_from_1d
-
-# Generate 4h from 1h data
-df_4h = generate_4h_from_1h(df_1h)
-
-# Generate 1w from 1d data
-df_1w = generate_1w_from_1d(df_1d)
-```
-
 ## 🐛 Troubleshooting
 
 ### Common Issues
 
-#### 1. API Error: "Unsupported granularity"
+#### 1. CDP API Authentication Error (30m data)
 
-**Problem**: Trying to fetch 4h or 1w data directly from Coinbase
-
-**Solution**: The system automatically handles this by generating these timeframes from supported ones. Make sure you have the source timeframe data (1h for 4h, 1d for 1w).
-
-#### 2. Google Sheets Quota Exceeded
-
-**Problem**: Service account exceeds quota limits
+**Problem**: "API credentials file not found" or "Authentication failed (401)"
 
 **Solution**: 
-- Switch to OAuth2 authentication (`USE_OAUTH = True`)
-- Use your personal Google account with higher quotas
+1. Ensure `credentials/cdp_api_key.json` exists
+2. Verify the JSON format is correct:
+   ```json
+   {
+     "name": "organizations/YOUR_ORG/apiKeys/YOUR_KEY",
+     "privateKey": "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----"
+   }
+   ```
+3. Check that the private key includes the BEGIN/END markers
+4. Verify you created the API key at https://portal.cdp.coinbase.com/
 
-#### 3. Missing Source Data for Unsupported Timeframe
 
-**Problem**: Trying to generate 4h without 1h data
+
+#### 3. Weekly Timestamp Mismatch
+
+**Problem**: Weekly candle timestamps don't match TradingView charts
 
 **Solution**: 
-- Fetch the source timeframe first (e.g., fetch 1h before 4h)
-- Or request both in the same run: `1h,4h`
+- The system now uses `label='left'` in pandas resample
+- Weekly timestamps represent the START of the week (Sunday 00:00)
+- This aligns with TradingView's weekly chart labeling
 
-#### 4. "Invalid frequency: H"
+#### 4. Missing Daily Data for Weekly Aggregation
 
-**Problem**: Pandas resampling frequency error
+**Problem**: Trying to generate 1w without 1d data
 
-**Solution**: Use lowercase `"4h"` instead of uppercase `"4H"` in config
+**Solution**: 
+- Fetch daily data first before requesting weekly
+- Or request both in the same run: `1d,1w`
+- The system automatically fetches daily data if missing
 
 #### 5. No Data Returned from API
 
@@ -430,24 +523,20 @@ for pair in pairs:
 
 ### Custom Timeframes
 
-Add new timeframes to `config.py`:
+The system supports adding new aggregated timeframes. For example, to add a 2-week timeframe:
 
+1. **Update `config.py`:**
 ```python
-UNSUPPORTED_SOURCE_MAP = {
-    "4h": "1h",
-    "1w": "1d",
-    "2h": "1h",  # Add 2-hour timeframe
-}
+AGGREGATED_TIMEFRAMES = ["1w", "2w"]
+ALL_TIMEFRAMES = ["5m", "30m", "1h", "6h", "1d", "1w", "2w"]
 ```
 
-Update `unsupported_tfs.py`:
-
+2. **Update `weekly_aggregator.py`:**
 ```python
-freq_map = {
-    "4h": "4h",
-    "1w": "W-MON",
-    "2h": "2h",  # Add 2-hour frequency
-}
+# Add 2-week aggregation function
+def aggregate_to_biweekly(daily_data: List[Dict]) -> List[Dict]:
+    # Similar to weekly aggregation but with '2W' frequency
+    weekly = df.resample('2W', label='left', closed='left').agg({...})
 ```
 
 ## 📈 Performance Tips
@@ -483,19 +572,23 @@ pytest tests/
 - pandas for powerful data manipulation
 - The Python community for excellent libraries
 
+## 📝 Version History
 
-### Version 1.0 (Current)
-- ✨ Added support for unsupported timeframes (4h, 1w)
-- 🔧 Smart timeframe generation from source data
-- 📦 Improved data caching mechanism
-- 🎨 Enhanced user interface with progress indicators
-- 🐛 Fixed pandas resampling frequency issues
-
+### Version 2.0 (Current)
+- ✨ **New**: Added 5m and 30m timeframe support
+- 🔐 **New**: CDP API authentication for Advanced Trade API (30m data)
+- 🔧 **Changed**: Weekly aggregation now uses Sunday-Sunday grouping
+- 🐛 **Fixed**: Weekly timestamp now shows START of week (aligns with TradingView)
+- 📦 **Changed**: Removed environment variable auth, uses `cdp_api_key.json`
+- 🎨 **Enhanced**: Automatic pagination for historical data (year ranges)
+- 📊 **Enhanced**: Better error handling and logging
 
 
 ## 📚 Additional Resources
 
-- [Coinbase API Documentation](https://docs.cloud.coinbase.com/exchange/docs)
+- [Coinbase Exchange API Documentation](https://docs.cloud.coinbase.com/exchange/docs)
+- [Coinbase Advanced Trade API](https://docs.cdp.coinbase.com/advanced-trade/docs/welcome)
+- [Coinbase CDP API Keys](https://portal.cdp.coinbase.com/access/api)
 - [Google Sheets API Guide](https://developers.google.com/sheets/api)
 - [pandas Documentation](https://pandas.pydata.org/docs/)
 - [Python Datetime Guide](https://docs.python.org/3/library/datetime.html)

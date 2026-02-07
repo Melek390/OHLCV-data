@@ -1,13 +1,24 @@
+"""
+OHLCV Data Ingestion System - Main Application
+Fetches OHLCV data from exchanges and stores locally and/or in Google Sheets
+Supports: 5m, 30m, 1h, 6h, 1d timeframes
+"""
 import sys
-from typing import List, Tuple
-from exchanges.coinbase import fetch_ohlcv, validate_symbol, GRANULARITY_MAP
+import pandas as pd
+from typing import List, Tuple, Optional
 
-# TOGGLE: Set to True to use OAuth2, False for local storage only 
-USE_OAUTH = True 
+from exchanges.coinbase import fetch_ohlcv as fetch_exchange, validate_symbol
+from exchanges.coinbase.advanced_trade import fetch_ohlcv_advanced
+from exchanges.coinbase.weekly_aggregator import aggregate_to_weekly, calculate_required_daily_candles
+
+# TOGGLE: Set to True to use OAuth2, False for service account
+USE_OAUTH = True
 from drive.sheets import (
+
         get_or_create_spreadsheet_in_folder,
         ensure_timeframe_tables,
         append_ohlcv_dataframe,
+    
         get_spreadsheet_url,
     )
 
@@ -16,20 +27,17 @@ if USE_OAUTH:
     
 from drive.data_manager import rest_to_dataframe
 from storage.local_storage import LocalStorage
-from exchanges.coinbase.unsupported_tfs import (
-    generate_4h_from_1h,
-    generate_1w_from_1d,
-)
 from config.config import (
     DRIVE_FOLDER_ID,
     TF_SHEET_NAMES,
     LOCAL_DATA_DIR,
-    SUPPORTED_TIMEFRAMES,
-    UNSUPPORTED_TIMEFRAMES,
-    UNSUPPORTED_SOURCE_MAP,
+    ALL_TIMEFRAMES,
+    EXCHANGE_API_TIMEFRAMES,
+    ADVANCED_TRADE_TIMEFRAMES,
 )
 from utils.logger import setup_logger
 from utils.exceptions import (
+    OHLCVException,
     APIException,
     GoogleSheetsException,
     StorageQuotaException,
@@ -42,10 +50,13 @@ logger = setup_logger(__name__)
 def print_banner():
     """Print application banner"""
     print("=" * 70)
-    print("📊 OHLCV Data Ingestion System v3.0")
+    print("📊 OHLCV Data Ingestion System v4.2")
     print("   Professional REST → Local CSV → Google Sheets Pipeline")
     print("   📁 Local storage with deduplication")
     print("   ☁️  Optional Drive backup")
+    print("   📈 Supports: 5m, 30m, 1h, 6h, 1d, 1w")
+    print("   🔄 Automatic pagination for historical data")
+    print("   🔑 30m data via CDP API (cdp_api_key.json)")
     print("=" * 70)
 
 
@@ -61,7 +72,7 @@ def select_exchange() -> str:
     Returns:
         Exchange name
     """
-    print("\n🔍 Available Exchanges:")
+    print("\n🏢 Available Exchanges:")
     print("  • Coinbase")
     
     while True:
@@ -76,12 +87,12 @@ def select_exchange() -> str:
         print("❌ Invalid exchange. Only 'coinbase' is supported.")
 
 
-def get_user_inputs() -> Tuple[str, List[str]]:
+def get_user_inputs() -> Tuple[str, List[str], Optional[int], Optional[int]]:
     """
-    Get trading pair and timeframes from user
+    Get trading pair, timeframes, start year, and end year from user
     
     Returns:
-        Tuple of (pair, timeframes list)
+        Tuple of (pair, timeframes list, start_year, end_year)
     
     Raises:
         ValueError: If inputs are invalid
@@ -97,9 +108,12 @@ def get_user_inputs() -> Tuple[str, List[str]]:
     
     # Get timeframes
     print("\n⏱️  Available Timeframes:")
-    print(f"  {', '.join(GRANULARITY_MAP.keys())}")
+    print(f"  {', '.join(ALL_TIMEFRAMES)}")
+    print("\n  📌 Notes:")
+    print("    • 5m, 1h, 6h, 1d: Exchange API (REST)")
+    print("    • 30m: Advanced Trade API")
     
-    tf_input = input("\nEnter timeframes (comma-separated, e.g., 1h,4h,1d): ").strip().lower()
+    tf_input = input("\nEnter timeframes (comma-separated, e.g., 5m,1h,1d): ").strip().lower()
     
     if not tf_input:
         raise ValueError("At least one timeframe is required")
@@ -107,14 +121,63 @@ def get_user_inputs() -> Tuple[str, List[str]]:
     timeframes = [tf.strip() for tf in tf_input.split(",")]
     
     # Validate timeframes
-    invalid_tfs = [tf for tf in timeframes if tf not in GRANULARITY_MAP]
+    invalid_tfs = [tf for tf in timeframes if tf not in ALL_TIMEFRAMES]
     if invalid_tfs:
         raise ValueError(
             f"Invalid timeframes: {', '.join(invalid_tfs)}. "
-            f"Supported: {', '.join(GRANULARITY_MAP.keys())}"
+            f"Supported: {', '.join(ALL_TIMEFRAMES)}"
         )
     
-    return pair, timeframes
+    # Get date range for historical data
+    print("\n📅 Historical Data Range (Optional)")
+    print("   Enter start and end years to fetch data for a specific period")
+    print("   System will automatically paginate to get all data in the range")
+    print("   Press Enter to skip both (fetch latest ~300 candles only)")
+    print("\n   Examples:")
+    print("     • Start: 2022, End: 2024  → Fetches Jan 1, 2022 to Dec 31, 2024")
+    print("     • Start: 2023, End: 2023  → Fetches only year 2023")
+    print("     • Start: (skip), End: 2024 → Fetches 2 years before 2024 to Dec 31, 2024")
+    
+    # Get start year
+    start_year_input = input("\nStart year (e.g., 2022) [Press Enter to skip]: ").strip()
+    start_year = None
+    if start_year_input:
+        try:
+            start_year = int(start_year_input)
+            if start_year < 2010 or start_year > 2030:
+                raise ValueError("Start year must be between 2010 and 2030")
+            logger.info(f"Start year: {start_year}")
+        except ValueError as e:
+            raise ValueError(f"Invalid start year: {start_year_input}. Must be a 4-digit year.")
+    
+    # Get end year
+    end_year_input = input("End year (e.g., 2024) [Press Enter to skip]: ").strip()
+    end_year = None
+    if end_year_input:
+        try:
+            end_year = int(end_year_input)
+            if end_year < 2010 or end_year > 2030:
+                raise ValueError("End year must be between 2010 and 2030")
+            
+            # Validate year range
+            if start_year and end_year < start_year:
+                raise ValueError(f"End year ({end_year}) cannot be before start year ({start_year})")
+            
+            logger.info(f"End year: {end_year}")
+        except ValueError as e:
+            raise ValueError(f"Invalid end year: {end_year_input}. Must be a 4-digit year.")
+    
+    # Display selected range
+    if start_year and end_year:
+        print(f"\n✅ Will fetch data from Jan 1, {start_year} to Dec 31, {end_year}")
+    elif start_year:
+        print(f"\n✅ Will fetch data starting from {start_year}")
+    elif end_year:
+        print(f"\n✅ Will fetch data up to Dec 31, {end_year} (auto-determined start date)")
+    else:
+        print(f"\n✅ Will fetch latest ~300 candles (no year range specified)")
+    
+    return pair, timeframes, start_year, end_year
 
 
 def ask_drive_upload() -> bool:
@@ -249,12 +312,23 @@ def main():
         
         # Get user inputs
         exchange = select_exchange()
-        pair, timeframes = get_user_inputs()
+        pair, timeframes, start_year, end_year = get_user_inputs()
         
         print("\n✅ Configuration:")
         print(f"  Exchange:   {exchange.capitalize()}")
         print(f"  Pair:       {pair}")
         print(f"  Timeframes: {', '.join(timeframes)}")
+        if start_year and end_year:
+            print(f"  Start Date: January 1, {start_year}")
+            print(f"  End Date:   December 31, {end_year}")
+        elif start_year:
+            print(f"  Start Date: January 1, {start_year}")
+            print(f"  End Date:   Latest available")
+        elif end_year:
+            print(f"  Start Date: Auto-determined (2 years before {end_year})")
+            print(f"  End Date:   December 31, {end_year}")
+        else:
+            print(f"  Date Range: Latest ~300 candles")
         print_separator()
         
         # Validate trading pair
@@ -265,12 +339,10 @@ def main():
                 "Please check the symbol and try again."
             )
         
-        # Separate supported and unsupported timeframes
-        supported_tfs = [tf for tf in timeframes if tf in SUPPORTED_TIMEFRAMES]
-        unsupported_tfs = [tf for tf in timeframes if tf in UNSUPPORTED_TIMEFRAMES]
-        
-        # Cache for source data needed for unsupported timeframes
-        source_data_cache = {}
+        # Separate timeframes by source
+        exchange_tfs = [tf for tf in timeframes if tf in EXCHANGE_API_TIMEFRAMES]
+        advanced_tfs = [tf for tf in timeframes if tf in ADVANCED_TRADE_TIMEFRAMES]
+        weekly_tfs = [tf for tf in timeframes if tf == '1w']  # Weekly requires aggregation
         
         # Fetch and store data locally for each timeframe
         total_new_rows = 0
@@ -278,18 +350,21 @@ def main():
         print("\n📥 FETCHING & STORING DATA LOCALLY")
         print("=" * 70)
         
-        # Process supported timeframes first (direct API fetch)
-        if supported_tfs:
-            print("\n🔹 Processing SUPPORTED timeframes (direct API fetch)...")
-            for tf in supported_tfs:
+        # Process Exchange API timeframes (5m, 1h, 6h, 1d)
+        if exchange_tfs:
+            print("\n🔹 Processing EXCHANGE API timeframes...")
+            
+            for tf in exchange_tfs:
                 print(f"\n⏳ Processing {tf.upper()} timeframe...")
                 
                 try:
                     # Fetch data from exchange
-                    logger.info(f"Fetching {tf} data from {exchange}...")
-                    raw_data = fetch_ohlcv(
+                    logger.info(f"Fetching {tf} data from {exchange} Exchange API...")
+                    raw_data = fetch_exchange(
                         symbol=pair,
                         timeframe=tf,
+                        start_year=start_year,
+                        end_year=end_year,
                     )
                     
                     if not raw_data:
@@ -307,11 +382,6 @@ def main():
                         continue
                     
                     print(f"  ✅ Processed {len(df)} valid candles")
-                    
-                    # Cache this data if it's needed for unsupported timeframes
-                    if tf in UNSUPPORTED_SOURCE_MAP.values():
-                        source_data_cache[tf] = df.copy()
-                        logger.info(f"Cached {tf} data for generating unsupported timeframes")
                     
                     # Save to local CSV
                     logger.info(f"Saving to local CSV...")
@@ -347,55 +417,39 @@ def main():
                     logger.error(f"Error for {tf}: {str(e)}")
                     continue
         
-        # Process unsupported timeframes (generate from source data)
-        if unsupported_tfs:
-            print("\n🔸 Processing UNSUPPORTED timeframes (generating from source data)...")
+        # Process Advanced Trade API timeframes (30m)
+        if advanced_tfs:
+            print("\n🔸 Processing ADVANCED TRADE API timeframes...")
+            print("   (Direct API fetch - no data generation)")
             
-            for tf in unsupported_tfs:
+            for tf in advanced_tfs:
                 print(f"\n⏳ Processing {tf.upper()} timeframe...")
                 
                 try:
-                    # Get source timeframe needed
-                    source_tf = UNSUPPORTED_SOURCE_MAP.get(tf)
+                    # Fetch directly from Advanced Trade API
+                    logger.info(f"Fetching {tf} data from Advanced Trade API...")
+                    raw_data = fetch_ohlcv_advanced(
+                        symbol=pair,
+                        timeframe=tf,
+                        start_year=start_year,
+                        end_year=end_year,
+                    )
                     
-                    if not source_tf:
-                        print(f"  ❌ No source timeframe mapping for {tf}")
+                    if not raw_data:
+                        print(f"  ⚠️  No data returned from API")
                         continue
                     
-                    print(f"  ℹ️  Unsupported by API - will generate from {source_tf.upper()} data")
+                    print(f"  📥 Fetched {len(raw_data)} candles from API")
                     
-                    # Check if we have source data in cache
-                    if source_tf in source_data_cache:
-                        source_df = source_data_cache[source_tf]
-                        print(f"  📦 Using cached {source_tf.upper()} data ({len(source_df)} rows)")
-                    else:
-                        # Try to load from local CSV
-                        print(f"  📂 Loading {source_tf.upper()} data from local CSV...")
-                        source_df = local_storage.load_csv(exchange, pair, source_tf)
-                        
-                        if source_df is None or source_df.empty:
-                            print(f"  ❌ No {source_tf.upper()} data available locally")
-                            print(f"     Please fetch {source_tf.upper()} data first!")
-                            continue
-                        
-                        print(f"  ✅ Loaded {len(source_df)} rows from {source_tf.upper()} CSV")
-                    
-                    # Generate target timeframe data
-                    logger.info(f"Generating {tf} from {source_tf}...")
-                    
-                    if tf == "4h":
-                        df = generate_4h_from_1h(source_df)
-                    elif tf == "1w":
-                        df = generate_1w_from_1d(source_df)
-                    else:
-                        print(f"  ❌ Unknown unsupported timeframe: {tf}")
-                        continue
+                    # Convert to DataFrame
+                    logger.info("Converting to DataFrame...")
+                    df = rest_to_dataframe(raw_data)
                     
                     if df.empty:
-                        print(f"  ⚠️  No data generated")
+                        print(f"  ⚠️  No valid data after processing")
                         continue
                     
-                    print(f"  ✅ Generated {len(df)} {tf.upper()} candles")
+                    print(f"  ✅ Processed {len(df)} valid candles")
                     
                     # Save to local CSV
                     logger.info(f"Saving to local CSV...")
@@ -418,6 +472,187 @@ def main():
                         print(f"  ℹ️  No new data (all existing in: {csv_path.name})")
                         print(f"     Full path: {csv_path}")
                     
+                except APIException as e:
+                    print(f"  ❌ API Error for {tf}: {str(e)}")
+                    logger.error(f"API error for {tf}: {str(e)}")
+                    continue
+                except DataValidationException as e:
+                    print(f"  ❌ Data Validation Error for {tf}: {str(e)}")
+                    logger.error(f"Data validation error for {tf}: {str(e)}")
+                    continue
+                except Exception as e:
+                    print(f"  ❌ Error for {tf}: {str(e)}")
+                    logger.error(f"Error for {tf}: {str(e)}")
+                    continue
+        
+        # Process Weekly timeframes (1w) - requires aggregation from daily data
+        if weekly_tfs:
+            print("\n🔷 Processing WEEKLY AGGREGATION timeframes...")
+            print("   (Aggregated from daily 1d data)")
+            
+            for tf in weekly_tfs:
+                print(f"\n⏳ Processing {tf.upper()} timeframe...")
+                
+                try:
+                    # Calculate required daily candles for the requested date range
+                    if start_year or end_year:
+                        num_daily = calculate_required_daily_candles(
+                            start_year=start_year,
+                            end_year=end_year
+                        )
+                        print(f"  📊 Need ~{num_daily} daily candles for {start_year or 'start'} to {end_year or 'now'}")
+                    else:
+                        # Default to ~100 weekly candles = ~700 daily
+                        num_daily = 700
+                        print(f"  📊 Need ~{num_daily} daily candles (default range)")
+                    
+                    # Check if we have daily data
+                    daily_csv_path = local_storage.get_csv_path(exchange, pair, '1d')
+                    should_fetch = False
+                    
+                    if not daily_csv_path.exists():
+                        print(f"  ⚠️  Daily (1d) data not found - need to fetch")
+                        should_fetch = True
+                    else:
+                        # Load existing daily data to check date range coverage
+                        print(f"  📁 Checking existing daily data coverage...")
+                        df_daily = local_storage.load_csv(exchange, pair, '1d')
+                        
+                        if df_daily is None or df_daily.empty:
+                            print(f"  ⚠️  Daily CSV is empty - need to fetch")
+                            should_fetch = True
+                        else:
+                            # Check date range coverage
+                            existing_start = df_daily['timestamp'].min()
+                            existing_end = df_daily['timestamp'].max()
+                            
+                            print(f"  📅 Existing data: {existing_start.strftime('%Y-%m-%d')} to {existing_end.strftime('%Y-%m-%d')} ({len(df_daily)} candles)")
+                            
+                            # Determine required date range
+                            from datetime import datetime
+                            if start_year and end_year:
+                                required_start = pd.Timestamp(datetime(start_year, 1, 1), tz='UTC')
+                                required_end = pd.Timestamp(datetime(end_year, 12, 31, 23, 59, 59), tz='UTC')
+                            elif start_year:
+                                required_start = pd.Timestamp(datetime(start_year, 1, 1), tz='UTC')
+                                required_end = pd.Timestamp(datetime.utcnow(), tz='UTC')
+                            elif end_year:
+                                required_start = pd.Timestamp(datetime(end_year - 2, 1, 1), tz='UTC')
+                                required_end = pd.Timestamp(datetime(end_year, 12, 31, 23, 59, 59), tz='UTC')
+                            else:
+                                # No year range, existing data is fine
+                                required_start = None
+                                required_end = None
+                            
+                            # Check if existing data covers required range
+                            if required_start and required_end:
+                                print(f"  📅 Required data: {required_start.strftime('%Y-%m-%d')} to {required_end.strftime('%Y-%m-%d')}")
+                                
+                                # Allow some tolerance (7 days on each end)
+                                start_gap = (existing_start - required_start).days
+                                end_gap = (required_end - existing_end).days
+                                
+                                if start_gap > 7:
+                                    print(f"  ⚠️  Missing data at start: {abs(start_gap)} days gap")
+                                    should_fetch = True
+                                elif end_gap > 7:
+                                    print(f"  ⚠️  Missing data at end: {end_gap} days gap")
+                                    should_fetch = True
+                                else:
+                                    print(f"  ✅ Existing data covers requested range")
+                                    should_fetch = False
+                            else:
+                                # No specific range required, use existing
+                                print(f"  ✅ Using existing daily data (no specific range requested)")
+                                should_fetch = False
+                    
+                    # Fetch daily data if needed
+                    if should_fetch:
+                        print(f"  🌐 Fetching {num_daily} daily candles from API...")
+                        logger.info(f"Fetching {num_daily} daily candles for weekly aggregation...")
+                        
+                        # Fetch daily data
+                        raw_daily = fetch_exchange(
+                            symbol=pair,
+                            timeframe='1d',
+                            num_candles=num_daily,
+                            start_year=start_year,
+                            end_year=end_year,
+                        )
+                        
+                        if not raw_daily:
+                            print(f"  ❌ Failed to fetch daily data - cannot create weekly")
+                            continue
+                        
+                        print(f"  📥 Fetched {len(raw_daily)} daily candles from API")
+                        
+                        # Convert to DataFrame
+                        df_daily = rest_to_dataframe(raw_daily)
+                        
+                        # Save daily data (will merge with existing if any)
+                        added = local_storage.save_csv(
+                            df=df_daily,
+                            exchange=exchange,
+                            pair=pair,
+                            timeframe='1d',
+                            deduplicate=True,
+                        )
+                        print(f"  💾 Saved {added} new daily candles to: {daily_csv_path.name}")
+                        
+                        # Reload to get merged data
+                        df_daily = local_storage.load_csv(exchange, pair, '1d')
+                    
+                    # At this point df_daily should be loaded (either existing or freshly fetched)
+                    if df_daily is None or df_daily.empty:
+                        print(f"  ❌ No daily data available - cannot aggregate")
+                        continue
+                    
+                    print(f"  ✅ Using {len(df_daily)} daily candles for aggregation")
+                    
+                    # Convert DataFrame back to list of dicts for aggregation
+                    logger.info("Aggregating daily data to weekly...")
+                    daily_data = df_daily.to_dict('records')
+                    
+                    # Aggregate to weekly
+                    weekly_data = aggregate_to_weekly(daily_data)
+                    
+                    if not weekly_data:
+                        print(f"  ⚠️  No weekly data generated from aggregation")
+                        continue
+                    
+                    print(f"  🔄 Aggregated {len(df_daily)} daily → {len(weekly_data)} weekly candles")
+                    
+                    # Convert to DataFrame
+                    df_weekly = rest_to_dataframe(weekly_data)
+                    
+                    if df_weekly.empty:
+                        print(f"  ⚠️  No valid weekly data after processing")
+                        continue
+                    
+                    # Save to local CSV
+                    logger.info(f"Saving weekly data to local CSV...")
+                    csv_path = local_storage.get_csv_path(exchange, pair, tf)
+                    
+                    added = local_storage.save_csv(
+                        df=df_weekly,
+                        exchange=exchange,
+                        pair=pair,
+                        timeframe=tf,
+                        deduplicate=True,
+                    )
+                    
+                    if added > 0:
+                        print(f"  ✅ Saved {added} new rows to: {csv_path.name}")
+                        print(f"     Full path: {csv_path}")
+                        total_new_rows += added
+                    else:
+                        print(f"  ℹ️  No new data (all existing in: {csv_path.name})")
+                        print(f"     Full path: {csv_path}")
+                    
+                except APIException as e:
+                    print(f"  ❌ API Error for {tf}: {str(e)}")
+                    logger.error(f"API error for {tf}: {str(e)}")
+                    continue
                 except DataValidationException as e:
                     print(f"  ❌ Data Validation Error for {tf}: {str(e)}")
                     logger.error(f"Data validation error for {tf}: {str(e)}")
@@ -434,7 +669,7 @@ def main():
         print(f"\n🎯 Local Storage Completed!")
         print(f"   Total new rows saved: {total_new_rows}")
         
-        # Ask if user wants to upload to Drive (only if we have new data)
+        # Ask if user wants to upload to Drive (only if we have data)
         if total_new_rows > 0 or any(local_storage.csv_exists(exchange, pair, tf) for tf in timeframes):
             if ask_drive_upload():
                 try:
@@ -445,8 +680,7 @@ def main():
                         client, creds = connect_gsheets_oauth()
                         print("✅ Connected via OAuth2 (your Google account)")
                     else:
-                        pass 
-                    
+                        pass
                     # Upload to Drive
                     upload_to_drive(
                         local_storage=local_storage,

@@ -92,18 +92,7 @@ def rest_to_dataframe(data: List[Dict]) -> pd.DataFrame:
 
 
 def validate_dataframe(df: pd.DataFrame) -> bool:
-    """
-    Validate DataFrame structure and content
     
-    Args:
-        df: DataFrame to validate
-    
-    Returns:
-        True if valid
-    
-    Raises:
-        DataValidationException: If validation fails
-    """
     if df.empty:
         raise DataValidationException("DataFrame is empty")
     
