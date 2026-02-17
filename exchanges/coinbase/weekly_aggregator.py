@@ -51,10 +51,10 @@ def aggregate_to_weekly(daily_data: List[Dict]) -> List[Dict]:
     # Set timestamp as index
     df = df.set_index("timestamp")
     
-    # Resample to weekly starting on Sunday
-    # 'W' groups Sunday to Saturday and labels with the END (next Sunday)
-    # We use label='left' to label with the START of the week (Sunday 00:00)
-    weekly = df.resample('W', label='left', closed='left').agg({
+    # Resample to weekly starting on Monday (matches TradingView's week start)
+    # 'W-MON' groups Monday to Sunday and labels with the END (next Monday)
+    # We use label='left' to label with the START of the week (Monday 00:00)
+    weekly = df.resample('W-MON', label='left', closed='left').agg({
         'open': 'first',    # First open of the week (Sunday midnight)
         'high': 'max',      # Highest high of the week
         'low': 'min',       # Lowest low of the week
