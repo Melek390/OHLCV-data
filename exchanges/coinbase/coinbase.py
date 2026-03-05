@@ -114,6 +114,8 @@ def fetch_ohlcv_chunk(
 
     try:
         response = requests.get(url, params=params, timeout=API_TIMEOUT)
+        print(f"[DEBUG 5m] URL: {response.url}")
+        print(f"[DEBUG 5m] Status: {response.status_code} | Body preview: {response.text[:300]}")
         response.raise_for_status()
     except requests.exceptions.Timeout:
         raise APIException(f"Request timeout after {API_TIMEOUT}s")

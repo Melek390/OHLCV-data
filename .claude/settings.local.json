@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"c:\\\\Users\\\\slsks\\\\OneDrive\\\\Desktop\\\\Clean codes\\\\OHLCV coinbase api\"/*.py)",
+      "Bash(ls \"c:\\\\Users\\\\slsks\\\\OneDrive\\\\Desktop\\\\Clean codes\\\\OHLCV coinbase api\"/src/*.py)",
+      "Bash(ls \"c:\\\\Users\\\\slsks\\\\OneDrive\\\\Desktop\\\\Clean codes\\\\OHLCV coinbase api\"/pipeline/*.py)"
+    ]
+  }
+}
