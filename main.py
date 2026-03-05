@@ -32,8 +32,8 @@ from config.config import (
     TF_SHEET_NAMES,
     LOCAL_DATA_DIR,
     ALL_TIMEFRAMES,
-    EXCHANGE_API_TIMEFRAMES,
     ADVANCED_TRADE_TIMEFRAMES,
+    GRANULARITY_MAP,
 )
 from utils.logger import setup_logger
 from utils.exceptions import (
@@ -340,9 +340,16 @@ def main():
             )
         
         # Separate timeframes by source
-        exchange_tfs = [tf for tf in timeframes if tf in EXCHANGE_API_TIMEFRAMES]
+        # Exchange API: any TF present in GRANULARITY_MAP that isn't handled by another source
+        exchange_tfs = [tf for tf in timeframes if tf in GRANULARITY_MAP and tf not in ADVANCED_TRADE_TIMEFRAMES and tf != '1w']
         advanced_tfs = [tf for tf in timeframes if tf in ADVANCED_TRADE_TIMEFRAMES]
-        weekly_tfs = [tf for tf in timeframes if tf == '1w']  # Weekly requires aggregation
+        weekly_tfs = [tf for tf in timeframes if tf == '1w']
+
+        logger.info(f"Timeframe routing — Exchange API: {exchange_tfs}, Advanced Trade: {advanced_tfs}, Weekly: {weekly_tfs}")
+        print(f"\n📋 Timeframe routing:")
+        print(f"   Exchange API (direct fetch): {', '.join(exchange_tfs) if exchange_tfs else 'none'}")
+        print(f"   Advanced Trade API:          {', '.join(advanced_tfs) if advanced_tfs else 'none'}")
+        print(f"   Weekly aggregation:          {', '.join(weekly_tfs) if weekly_tfs else 'none'}")  # Weekly requires aggregation
         
         # Fetch and store data locally for each timeframe
         total_new_rows = 0
